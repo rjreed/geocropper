@@ -1,0 +1,350 @@
+/* global Image createImageBitmap */
+
+// cropper.js
+
+import {
+  compute_homography,
+  invert_3x3,
+  multiply_mat3_vec3,
+  orientation,
+  on_segment,
+  segments_intersect,
+  polygon_area,
+  is_valid_quad,
+  bilinear_sample
+
+}
+from './geometry.js';
+
+
+// DOM/setup
+
+const file_input = document.getElementById('file_input');
+const main_canvas = document.getElementById('main_canvas');
+const crop_button = document.getElementById('crop_button');
+const grid_divisions_input = document.getElementById('grid_divisions');
+const cropped_canvas = document.getElementById('cropped_canvas');
+const download_link = document.getElementById('download_link');
+const tooltip = document.getElementById('tooltip');
+
+const main_ctx = main_canvas.getContext('2d');
+let image_bitmap = null;
+let src_image_data = null;
+
+let corners = [
+  { x: 100, y: 100 }, // TL
+  { x: 700, y: 100 }, // TR
+  { x: 700, y: 500 }, // BR
+  { x: 100, y: 500 }, // BL
+];
+
+let dragging_index = -1;
+const handle_radius = 10;
+
+let selected_corner = null;
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function show_tooltip(text, x, y) {
+  tooltip.textContent = text;
+  tooltip.style.display = 'block';
+  tooltip.style.left = `${x + 10}px`;
+  tooltip.style.top = `${y + 10}px`;
+}
+
+function hide_tooltip() {
+  tooltip.style.display = 'none';
+}
+
+function draw_perspective_grid() {
+  const divisions = Math.max(1, parseInt(grid_divisions_input.value, 10) || 10);
+  const valid = is_valid_quad(corners);
+
+  if (!valid) {
+    main_ctx.strokeStyle = 'rgba(255,0,0,0.9)';
+    main_ctx.lineWidth = 3;
+  }
+  else {
+    main_ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    main_ctx.lineWidth = 2;
+  }
+
+  // outer quad
+  main_ctx.beginPath();
+  main_ctx.moveTo(corners[0].x, corners[0].y);
+  for (let i = 1; i < 4; i++) main_ctx.lineTo(corners[i].x, corners[i].y);
+  main_ctx.closePath();
+  main_ctx.stroke();
+
+  if (!valid) {
+    const centroid = corners.reduce(
+      (acc, p) => ({ x: acc.x + p.x / 4, y: acc.y + p.y / 4 }), { x: 0, y: 0 }
+    );
+    show_tooltip('U bum', centroid.x, centroid.y);
+  }
+  else {
+    hide_tooltip();
+  }
+
+  const line_alpha = valid ? 0.4 : 0.6;
+  const line_color = valid ? '255,255,255' : '255,0,0';
+
+  // horizontal interpolation
+  for (let i = 1; i < divisions; i++) {
+    const t = i / divisions;
+    const left_x = lerp(corners[0].x, corners[3].x, t);
+    const left_y = lerp(corners[0].y, corners[3].y, t);
+    const right_x = lerp(corners[1].x, corners[2].x, t);
+    const right_y = lerp(corners[1].y, corners[2].y, t);
+    main_ctx.strokeStyle = `rgba(${line_color},${line_alpha})`;
+    main_ctx.lineWidth = 1;
+    main_ctx.beginPath();
+    main_ctx.moveTo(left_x, left_y);
+    main_ctx.lineTo(right_x, right_y);
+    main_ctx.stroke();
+  }
+
+  // vertical interpolation
+  for (let i = 1; i < divisions; i++) {
+    const t = i / divisions;
+    const top_x = lerp(corners[0].x, corners[1].x, t);
+    const top_y = lerp(corners[0].y, corners[1].y, t);
+    const bottom_x = lerp(corners[3].x, corners[2].x, t);
+    const bottom_y = lerp(corners[3].y, corners[2].y, t);
+    main_ctx.strokeStyle = `rgba(${line_color},${line_alpha})`;
+    main_ctx.beginPath();
+    main_ctx.moveTo(top_x, top_y);
+    main_ctx.lineTo(bottom_x, bottom_y);
+    main_ctx.stroke();
+  }
+}
+
+function draw() {
+  if (!image_bitmap) {
+    main_ctx.clearRect(0, 0, main_canvas.width, main_canvas.height);
+    return;
+  }
+  main_ctx.clearRect(0, 0, main_canvas.width, main_canvas.height);
+  main_ctx.drawImage(image_bitmap, 0, 0, main_canvas.width, main_canvas.height);
+  draw_perspective_grid();
+  // handles (transparent fill + green stroke)
+  for (let i = 0; i < 4; i++) {
+    const { x, y } = corners[i];
+    main_ctx.fillStyle = 'rgba(0,255,128,0)'; // no opaque fill
+    main_ctx.strokeStyle = 'rgba(0,255,128,1)'; // solid green border
+    main_ctx.lineWidth = 3; // a bit thicker so you can see it
+    main_ctx.beginPath();
+    main_ctx.arc(x, y, handle_radius, 0, Math.PI * 2);
+    // fill() here does nothing (fully transparent)
+    main_ctx.fill();
+    main_ctx.stroke();
+  }
+}
+
+main_canvas.addEventListener('mousedown', e => {
+  const rect = main_canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  for (let i = 0; i < 4; i++) {
+    const dx = corners[i].x - mx;
+    const dy = corners[i].y - my;
+    if (Math.hypot(dx, dy) <= handle_radius + 4) {
+      dragging_index = i;
+      selected_corner = i;
+      return;
+    }
+  }
+
+});
+
+main_canvas.addEventListener('mousemove', e => {
+  if (dragging_index === -1) return;
+  const rect = main_canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  corners[dragging_index].x = Math.min(main_canvas.width, Math.max(0, mx));
+  corners[dragging_index].y = Math.min(main_canvas.height, Math.max(0, my));
+  draw();
+});
+
+window.addEventListener('mouseup', () => {
+  dragging_index = -1;
+});
+
+// Touch support for mobile
+main_canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const touch = e.touches[0];
+  const rect = main_canvas.getBoundingClientRect();
+  const tx = touch.clientX - rect.left;
+  const ty = touch.clientY - rect.top;
+  for (let i = 0; i < 4; i++) {
+    const dx = corners[i].x - tx;
+    const dy = corners[i].y - ty;
+    if (Math.hypot(dx, dy) <= handle_radius + 4) {
+      dragging_index = i;
+      return;
+    }
+  }
+});
+
+main_canvas.addEventListener('touchmove', e => {
+  if (dragging_index === -1) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  const rect = main_canvas.getBoundingClientRect();
+  const tx = touch.clientX - rect.left;
+  const ty = touch.clientY - rect.top;
+  corners[dragging_index].x = Math.min(main_canvas.clientWidth, Math.max(0, tx));
+  corners[dragging_index].y = Math.min(main_canvas.clientHeight, Math.max(0, ty));
+  draw();
+});
+
+window.addEventListener('touchend', e => {
+  // stop dragging on touch end or cancel
+  dragging_index = -1;
+});
+window.addEventListener('touchcancel', e => {
+  dragging_index = -1;
+});
+
+
+file_input.addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img_bitmap = await create_image_bitmap_from_file(file);
+  image_bitmap = img_bitmap;
+  const inset = 50;
+  corners = [
+    { x: inset, y: inset },
+    { x: main_canvas.width - inset, y: inset },
+    { x: main_canvas.width - inset, y: main_canvas.height - inset },
+    { x: inset, y: main_canvas.height - inset },
+  ];
+  crop_button.disabled = false;
+  draw();
+});
+
+async function create_image_bitmap_from_file(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      const off = document.createElement('canvas');
+      off.width = img.naturalWidth;
+      off.height = img.naturalHeight;
+      const ctx = off.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      src_image_data = ctx.getImageData(0, 0, off.width, off.height);
+      createImageBitmap(img).then(bm => res(bm));
+    };
+    img.onerror = e => rej(e);
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+crop_button.addEventListener('click', () => {
+  if (!image_bitmap || !src_image_data) return;
+  if (!is_valid_quad(corners)) {
+    alert('Quadrilateral is invalid; fix the corners first.');
+    return;
+  }
+  perform_crop();
+});
+
+window.addEventListener('keydown', e => {
+  if (selected_corner === null) return;
+
+  // amount to move: 1px or 5px with Shift
+  const step = e.shiftKey ? 5 : 1;
+  let dx = 0,
+    dy = 0;
+
+  switch (e.key) {
+    case 'ArrowLeft':
+      dx = -step;
+      break;
+    case 'ArrowRight':
+      dx = step;
+      break;
+    case 'ArrowUp':
+      dy = -step;
+      break;
+    case 'ArrowDown':
+      dy = step;
+      break;
+    default:
+      return; // not an arrow key
+  }
+
+  e.preventDefault();
+  // clamp to canvas bounds (CSS size)
+  const w = main_canvas.clientWidth;
+  const h = main_canvas.clientHeight;
+  const corner = corners[selected_corner];
+  corner.x = Math.min(w, Math.max(0, corner.x + dx));
+  corner.y = Math.min(h, Math.max(0, corner.y + dy));
+
+  draw();
+});
+
+
+function perform_crop() {
+  const scale_x = src_image_data.width / main_canvas.width;
+  const scale_y = src_image_data.height / main_canvas.height;
+  const src_quad = corners.map(p => ({ x: p.x * scale_x, y: p.y * scale_y }));
+
+  const dist = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+  const width_a = dist(src_quad[0], src_quad[1]);
+  const width_b = dist(src_quad[3], src_quad[2]);
+  const target_width = Math.round((width_a + width_b) / 2);
+  const height_a = dist(src_quad[0], src_quad[3]);
+  const height_b = dist(src_quad[1], src_quad[2]);
+  const target_height = Math.round((height_a + height_b) / 2);
+
+  if (target_width <= 0 || target_height <= 0) {
+    alert('Invalid quadrilateral for cropping.');
+    return;
+  }
+
+  const dst_rect = [
+    { x: 0, y: 0 },
+    { x: target_width, y: 0 },
+    { x: target_width, y: target_height },
+    { x: 0, y: target_height },
+  ];
+
+  const H = compute_homography(src_quad, dst_rect);
+  const H_inv = invert_3x3(H);
+
+  const dest_canvas = cropped_canvas;
+  dest_canvas.width = target_width;
+  dest_canvas.height = target_height;
+  const dest_ctx = dest_canvas.getContext('2d');
+  const dest_image = dest_ctx.createImageData(target_width, target_height);
+  const dest_data = dest_image.data;
+
+  for (let j = 0; j < target_height; j++) {
+    for (let i = 0; i < target_width; i++) {
+      const [x_h, y_h, w_h] = multiply_mat3_vec3(H_inv, [i, j, 1]);
+      const src_x = x_h / w_h;
+      const src_y = y_h / w_h;
+      const sample = bilinear_sample(src_image_data, src_x, src_y);
+      const idx = (j * target_width + i) * 4;
+      dest_data[idx + 0] = sample[0];
+      dest_data[idx + 1] = sample[1];
+      dest_data[idx + 2] = sample[2];
+      dest_data[idx + 3] = sample[3];
+    }
+  }
+
+  dest_ctx.putImageData(dest_image, 0, 0);
+  dest_canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    download_link.href = url;
+  }, 'image/png');
+}
+
+// initial draw
+draw();

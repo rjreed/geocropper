@@ -1,0 +1,186 @@
+// geometry.js
+
+//// APP
+
+// ---- Linear algebra & homography ----
+
+/**
+ * Solve Ax = b by Gauss-Jordan elimination (A is NxN, b is N)
+ */
+export function solve_linear_system(a, b) {
+  const n = a.length;
+  // build augmented matrix [A|b]
+  const M = a.map((row, i) => row.slice().concat(b[i]));
+  for (let i = 0; i < n; i++) {
+    // pivot
+    let maxRow = i;
+    for (let j = i + 1; j < n; j++) {
+      if (Math.abs(M[j][i]) > Math.abs(M[maxRow][i])) maxRow = j;
+    }
+    if (Math.abs(M[maxRow][i]) < 1e-12) {
+      throw new Error('Matrix is singular or nearly singular');
+    }
+    [M[i], M[maxRow]] = [M[maxRow], M[i]];
+    // normalize pivot row
+    const piv = M[i][i];
+    for (let j = i; j <= n; j++) M[i][j] /= piv;
+    // eliminate other rows
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const factor = M[j][i];
+      for (let k = i; k <= n; k++) {
+        M[j][k] -= factor * M[i][k];
+      }
+    }
+  }
+  // extract solution
+  return M.map((row) => row[n]);
+}
+
+/**
+ * Compute 3×3 homography H mapping src_pts → dst_pts
+ * both are arrays of 4 {x,y}.
+ */
+export function compute_homography(src_pts, dst_pts) {
+  const A = [],
+    b = [];
+  for (let i = 0; i < 4; i++) {
+    const { x, y } = src_pts[i];
+    const { x: u, y: v } = dst_pts[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+    b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+    b.push(v);
+  }
+  const h = solve_linear_system(A, b);
+  return [
+    [h[0], h[1], h[2]],
+    [h[3], h[4], h[5]],
+    [h[6], h[7], 1],
+  ];
+}
+
+/**
+ * Invert a 3×3 matrix.
+ */
+export function invert_3x3(m) {
+  const a = m[0][0],
+    b = m[0][1],
+    c = m[0][2];
+  const d = m[1][0],
+    e = m[1][1],
+    f = m[1][2];
+  const g = m[2][0],
+    h = m[2][1],
+    i = m[2][2];
+  const A = e * i - f * h;
+  const B = -(d * i - f * g);
+  const C = d * h - e * g;
+  const D = -(b * i - c * h);
+  const E = a * i - c * g;
+  const F = -(a * h - b * g);
+  const G = b * f - c * e;
+  const H = -(a * f - c * d);
+  const I = a * e - b * d;
+  const det = a * A + b * B + c * C;
+  if (Math.abs(det) < 1e-12) {
+    throw new Error('Non-invertible matrix');
+  }
+  return [
+    [A / det, D / det, G / det],
+    [B / det, E / det, H / det],
+    [C / det, F / det, I / det],
+  ];
+}
+
+/**
+ * Multiply 3×3 matrix m by vector v (length 3).
+ */
+export function multiply_mat3_vec3(m, v) {
+  return [
+    m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+    m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+    m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+  ];
+}
+
+// ---- Bilinear sampling ----
+
+/**
+ * Sample with bilinear interpolation from image_data
+ * @returns [r,g,b,a]
+ */
+export function bilinear_sample(image_data, x, y) {
+  const { data, width, height } = image_data;
+  if (x < 0 || y < 0 || x >= width - 1 || y >= height - 1) {
+    const xi = Math.min(width - 1, Math.max(0, Math.round(x)));
+    const yi = Math.min(height - 1, Math.max(0, Math.round(y)));
+    const idx = (yi * width + xi) * 4;
+    return [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]];
+  }
+  const x0 = Math.floor(x),
+    x1 = x0 + 1;
+  const y0 = Math.floor(y),
+    y1 = y0 + 1;
+  const wx = x - x0,
+    wy = y - y0;
+  function px(px0, py0) {
+    const i = (py0 * width + px0) * 4;
+    return [data[i], data[i + 1], data[i + 2], data[i + 3]];
+  }
+  const p00 = px(x0, y0),
+    p10 = px(x1, y0),
+    p01 = px(x0, y1),
+    p11 = px(x1, y1);
+  const out = [0, 0, 0, 0];
+  for (let c = 0; c < 4; c++) {
+    const top = p00[c] * (1 - wx) + p10[c] * wx;
+    const bottom = p01[c] * (1 - wx) + p11[c] * wx;
+    out[c] = top * (1 - wy) + bottom * wy;
+  }
+  return out;
+}
+
+// ---- Quad‐validity geometry ----
+
+export function orientation(a, b, c) {
+  return (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
+}
+
+export function on_segment(a, b, c) {
+  return (
+    Math.min(a.x, c.x) <= b.x &&
+    b.x <= Math.max(a.x, c.x) &&
+    Math.min(a.y, c.y) <= b.y &&
+    b.y <= Math.max(a.y, c.y)
+  );
+}
+
+export function segments_intersect(p1, p2, p3, p4) {
+  const o1 = orientation(p1, p2, p3),
+    o2 = orientation(p1, p2, p4),
+    o3 = orientation(p3, p4, p1),
+    o4 = orientation(p3, p4, p2);
+  if (o1 === 0 && on_segment(p1, p3, p2)) return true;
+  if (o2 === 0 && on_segment(p1, p4, p2)) return true;
+  if (o3 === 0 && on_segment(p3, p1, p4)) return true;
+  if (o4 === 0 && on_segment(p3, p2, p4)) return true;
+  return o1 * o2 < 0 && o3 * o4 < 0;
+}
+
+export function polygon_area(pts) {
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  return Math.abs(area) / 2;
+}
+
+export function is_valid_quad(corners) {
+  if (segments_intersect(corners[0], corners[1], corners[2], corners[3]))
+    return false;
+  if (segments_intersect(corners[1], corners[2], corners[3], corners[0]))
+    return false;
+  return polygon_area(corners) >= 1;
+}
