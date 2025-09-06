@@ -24,6 +24,19 @@ const wrapper_el = document.querySelector('.canvas-wrapper');
 
 const main_ctx = main_canvas.getContext('2d', { alpha: true });
 
+// ---------- UI sizing (CSS pixels; converted to canvas px at draw time) ----------
+const UI = {
+  gridStrokeCss: 2,
+  gridStrokeInvalidCss: 3,
+  innerLineCss: 1,
+  handleStrokeCss: 3,
+  handleRadiusCss: 10, // normal visible circle radius
+  handleRadiusDragCss: 20, // enlarged while dragging
+  handleHitRadiusCss: 22, // larger hit area to make selection easier
+  magnifyScale: 2.5, // zoom factor inside the dragging handle
+  crosshairArmCss: 10, // crosshair arm length (CSS px)
+};
+
 // ---------- State (all coordinates in CANVAS/IMAGE pixels) ----------
 let image_bitmap = null; // original-size ImageBitmap
 let src_image_data = null; // original-size ImageData
@@ -37,27 +50,33 @@ let corners = [
 
 let dragging_index = -1;
 let selected_corner = null;
-const handle_radius = 10;
 
 // ---------- Utilities ----------
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+// Canvas CSS->canvas scale factors (for constant on-screen sizes)
+function get_canvas_scale() {
+  const rect = main_canvas.getBoundingClientRect();
+  const sx = main_canvas.width / Math.max(1, rect.width);
+  const sy = main_canvas.height / Math.max(1, rect.height);
+  const s = (sx + sy) / 2; // isotropic for strokes/radii
+  return { sx, sy, s };
+}
+
 // Convert a client (CSS) point to canvas (image) pixels
 function to_canvas_coords(client_x, client_y) {
   const rect = main_canvas.getBoundingClientRect();
-  const scale_x = main_canvas.width / rect.width;
-  const scale_y = main_canvas.height / rect.height;
+  const { sx, sy } = get_canvas_scale();
   return {
-    x: (client_x - rect.left) * scale_x,
-    y: (client_y - rect.top) * scale_y,
+    x: (client_x - rect.left) * sx,
+    y: (client_y - rect.top) * sy,
   };
 }
 
 // Convert canvas (image) pixels to CSS pixels *relative to the wrapper*
 function canvas_to_css(x, y) {
-  // Canvas fills the wrapper, so use its rect for CSS scaling
   const rect = main_canvas.getBoundingClientRect();
   const scale_x = rect.width / main_canvas.width;
   const scale_y = rect.height / main_canvas.height;
@@ -75,14 +94,76 @@ function hide_tooltip() {
   tooltip.style.display = 'none';
 }
 
+// ---------- Magnifier ----------
+function draw_magnifier(cx, cy, radiusCanvasPx, zoom) {
+  if (!image_bitmap) return;
+  const { s } = get_canvas_scale();
+
+  // Source rectangle in image/canvas pixels to zoom into
+  const srcHalf = radiusCanvasPx / zoom;
+  let sx = cx - srcHalf;
+  let sy = cy - srcHalf;
+  // Clamp source rect to image bounds
+  const maxSx = main_canvas.width - 2 * srcHalf;
+  const maxSy = main_canvas.height - 2 * srcHalf;
+  if (sx < 0) sx = 0;
+  if (sy < 0) sy = 0;
+  if (sx > maxSx) sx = Math.max(0, maxSx);
+  if (sy > maxSy) sy = Math.max(0, maxSy);
+
+  main_ctx.save();
+  // Clip to circle
+  main_ctx.beginPath();
+  main_ctx.arc(cx, cy, radiusCanvasPx, 0, Math.PI * 2);
+  main_ctx.clip();
+
+  // Draw the zoomed image inside the circle
+  main_ctx.drawImage(
+    image_bitmap,
+    sx,
+    sy,
+    2 * srcHalf,
+    2 * srcHalf,
+    cx - radiusCanvasPx,
+    cy - radiusCanvasPx,
+    2 * radiusCanvasPx,
+    2 * radiusCanvasPx,
+  );
+
+  // Crosshair for precision
+  const arm = UI.crosshairArmCss * s;
+  main_ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  main_ctx.lineWidth = 1 * s;
+  main_ctx.beginPath();
+  main_ctx.moveTo(cx - arm, cy);
+  main_ctx.lineTo(cx + arm, cy);
+  main_ctx.moveTo(cx, cy - arm);
+  main_ctx.lineTo(cx, cy + arm);
+  main_ctx.stroke();
+
+  main_ctx.restore();
+
+  // Optional subtle drop shadow around the magnifier ring
+  main_ctx.save();
+  main_ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  main_ctx.shadowBlur = 6 * s;
+  main_ctx.beginPath();
+  main_ctx.arc(cx, cy, radiusCanvasPx, 0, Math.PI * 2);
+  main_ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  main_ctx.lineWidth = 2 * s;
+  main_ctx.stroke();
+  main_ctx.restore();
+}
+
 // ---------- Drawing ----------
 function draw_grid_and_handles() {
   const divisions = Math.max(1, parseInt(grid_divisions_input.value, 10) || 10);
   const valid = is_valid_quad(corners);
+  const { s } = get_canvas_scale();
 
   // Outer quad
   main_ctx.strokeStyle = valid ? 'rgba(255,255,255,0.8)' : 'rgba(255,0,0,0.9)';
-  main_ctx.lineWidth = valid ? 2 : 3;
+  main_ctx.lineWidth = (valid ? UI.gridStrokeCss : UI.gridStrokeInvalidCss) * s;
   main_ctx.beginPath();
   main_ctx.moveTo(corners[0].x, corners[0].y);
   for (let i = 1; i < 4; i++) main_ctx.lineTo(corners[i].x, corners[i].y);
@@ -103,6 +184,7 @@ function draw_grid_and_handles() {
   // Internal grid lines
   const line_alpha = valid ? 0.4 : 0.6;
   const line_color = valid ? '255,255,255' : '255,0,0';
+  const inner_w = UI.innerLineCss * s;
 
   for (let i = 1; i < divisions; i++) {
     const t = i / divisions;
@@ -112,7 +194,7 @@ function draw_grid_and_handles() {
     const rx = lerp(corners[1].x, corners[2].x, t);
     const ry = lerp(corners[1].y, corners[2].y, t);
     main_ctx.strokeStyle = `rgba(${line_color},${line_alpha})`;
-    main_ctx.lineWidth = 1;
+    main_ctx.lineWidth = inner_w;
     main_ctx.beginPath();
     main_ctx.moveTo(lx, ly);
     main_ctx.lineTo(rx, ry);
@@ -126,19 +208,33 @@ function draw_grid_and_handles() {
     const bx = lerp(corners[3].x, corners[2].x, t);
     const by = lerp(corners[3].y, corners[2].y, t);
     main_ctx.strokeStyle = `rgba(${line_color},${line_alpha})`;
+    main_ctx.lineWidth = inner_w;
     main_ctx.beginPath();
     main_ctx.moveTo(tx, ty);
     main_ctx.lineTo(bx, by);
     main_ctx.stroke();
   }
 
-  // Handles (transparent fill, green stroke)
+  // Handles (transparent fill, constant-size radius; enlarged + zoom while dragging)
+  const baseRadius = UI.handleRadiusCss * s;
+  const dragRadius = UI.handleRadiusDragCss * s;
+  const strokeW = UI.handleStrokeCss * s;
+
   for (let i = 0; i < 4; i++) {
     const { x, y } = corners[i];
+    const isDraggingThis = i === dragging_index;
+    const r = isDraggingThis ? dragRadius : baseRadius;
+
+    // If dragging this handle, render magnified view first (inside the circle)
+    if (isDraggingThis) {
+      draw_magnifier(x, y, r, UI.magnifyScale);
+    }
+
+    // Ring
     main_ctx.strokeStyle = 'rgba(0,255,128,1)';
-    main_ctx.lineWidth = 3;
+    main_ctx.lineWidth = strokeW;
     main_ctx.beginPath();
-    main_ctx.arc(x, y, handle_radius, 0, Math.PI * 2);
+    main_ctx.arc(x, y, r, 0, Math.PI * 2);
     main_ctx.stroke();
   }
 }
@@ -156,17 +252,26 @@ function draw() {
   draw_grid_and_handles();
 }
 
-// ---------- Events: mouse, touch, keyboard ----------
-main_canvas.addEventListener('mousedown', (e) => {
-  const { x: mx, y: my } = to_canvas_coords(e.clientX, e.clientY);
+// ---------- Hit test ----------
+function hit_test_corner(mx, my) {
+  const { s } = get_canvas_scale();
+  const hit_r = UI.handleHitRadiusCss * s;
   for (let i = 0; i < 4; i++) {
     const dx = corners[i].x - mx;
     const dy = corners[i].y - my;
-    if (Math.hypot(dx, dy) <= handle_radius + 4) {
-      dragging_index = i;
-      selected_corner = i;
-      return;
-    }
+    if (Math.hypot(dx, dy) <= hit_r) return i;
+  }
+  return -1;
+}
+
+// ---------- Events: mouse, touch, keyboard ----------
+main_canvas.addEventListener('mousedown', (e) => {
+  const { x: mx, y: my } = to_canvas_coords(e.clientX, e.clientY);
+  const idx = hit_test_corner(mx, my);
+  if (idx !== -1) {
+    dragging_index = idx;
+    selected_corner = idx;
+    draw(); // immediately show enlarged/magnified handle
   }
 });
 
@@ -179,23 +284,17 @@ main_canvas.addEventListener('mousemove', (e) => {
 });
 
 window.addEventListener('mouseup', () => {
-  dragging_index = -1;
+  if (dragging_index !== -1) {
+    dragging_index = -1;
+    draw(); // redraw to remove magnifier
+  }
 });
 
 // Click to select/deselect
 main_canvas.addEventListener('click', (e) => {
   const { x: mx, y: my } = to_canvas_coords(e.clientX, e.clientY);
-  let hit = false;
-  for (let i = 0; i < 4; i++) {
-    const dx = corners[i].x - mx;
-    const dy = corners[i].y - my;
-    if (Math.hypot(dx, dy) <= handle_radius + 4) {
-      selected_corner = i;
-      hit = true;
-      break;
-    }
-  }
-  if (!hit) selected_corner = null;
+  const idx = hit_test_corner(mx, my);
+  selected_corner = idx !== -1 ? idx : null;
 });
 
 // Touch support
@@ -203,14 +302,11 @@ main_canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   const t = e.touches[0];
   const { x: tx, y: ty } = to_canvas_coords(t.clientX, t.clientY);
-  for (let i = 0; i < 4; i++) {
-    const dx = corners[i].x - tx;
-    const dy = corners[i].y - ty;
-    if (Math.hypot(dx, dy) <= handle_radius + 4) {
-      dragging_index = i;
-      selected_corner = i;
-      return;
-    }
+  const idx = hit_test_corner(tx, ty);
+  if (idx !== -1) {
+    dragging_index = idx;
+    selected_corner = idx;
+    draw(); // show magnifier
   }
 });
 
@@ -225,10 +321,16 @@ main_canvas.addEventListener('touchmove', (e) => {
 });
 
 window.addEventListener('touchend', () => {
-  dragging_index = -1;
+  if (dragging_index !== -1) {
+    dragging_index = -1;
+    draw(); // remove magnifier
+  }
 });
 window.addEventListener('touchcancel', () => {
-  dragging_index = -1;
+  if (dragging_index !== -1) {
+    dragging_index = -1;
+    draw();
+  }
 });
 
 // Arrow-key nudging (Shift = 5px) in canvas pixel space
@@ -282,7 +384,6 @@ file_input.addEventListener('change', async (e) => {
       `${image_bitmap.width} / ${image_bitmap.height}`,
     );
   }
-  // Ensure canvas fills wrapper in CSS (handled by your CSS: width:100%; height:100%)
 
   // Seed corners with a small inset inside the image bounds
   const inset = Math.round(
