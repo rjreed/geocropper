@@ -1,4 +1,4 @@
-// cropper.js 33
+// cropper.js
 
 //// IMPORTS
 
@@ -24,21 +24,19 @@ const wrapper_el = document.querySelector('.canvas-wrapper');
 
 const main_ctx = main_canvas.getContext('2d', { alpha: true });
 
-console.log('cropper.js v=bigring2 loaded');
-
-// ---------- UI sizing (CSS px; always-large ring) ----------
+// ---------- UI sizing (CSS px) ----------
 const UI = {
   gridStrokeCss: 2,
   gridStrokeInvalidCss: 3,
   innerLineCss: 1,
   handleStrokeCss: 3,
 
-  // Big ring
-  handleRadiusCss: 18, // idle ring radius
-  handleRadiusDragCss: 90, // HUGE ring when active
-  handleHitRadiusCss: 60, // generous hit area
+  // Handle at the corner stays normal size (even while dragging)
+  handleRadiusCss: 18,
+  handleHitRadiusCss: 60,
 
-  // Zoom inside the ring
+  // Center magnifier circle (shown only while dragging)
+  magnifierRadiusCss: 160, // adjust bigger/smaller if you like
   magnifyScale: 5,
   crosshairArmCss: 16,
 };
@@ -100,55 +98,63 @@ function hide_tooltip() {
   tooltip.style.display = 'none';
 }
 
-// ---------- Magnifier (also draws the two corner edges inside) ----------
-function draw_magnifier(cx, cy, radiusCanvasPx, zoom, cornerIndex) {
+// ---------- Magnifier (now rendered at CANVAS CENTER; samples around corner) ----------
+function draw_magnifier(
+  viewCx,
+  viewCy,
+  radiusCanvasPx,
+  zoom,
+  cornerIndex,
+  sampleCx,
+  sampleCy,
+) {
   if (!image_bitmap) return;
   const { s } = get_canvas_scale();
 
-  // Source rectangle in image/canvas pixels to zoom into
+  // Source rectangle in image/canvas pixels to zoom into (centered on the corner)
   const srcHalf = radiusCanvasPx / zoom;
-  let sx = cx - srcHalf;
-  let sy = cy - srcHalf;
+  let sx0 = sampleCx - srcHalf;
+  let sy0 = sampleCy - srcHalf;
 
   // Clamp source rect to image bounds
-  const maxSx = Math.max(0, main_canvas.width - 2 * srcHalf);
-  const maxSy = Math.max(0, main_canvas.height - 2 * srcHalf);
-  if (sx < 0) sx = 0;
-  if (sy < 0) sy = 0;
-  if (sx > maxSx) sx = maxSx;
-  if (sy > maxSy) sy = maxSy;
+  const maxSx0 = Math.max(0, main_canvas.width - 2 * srcHalf);
+  const maxSy0 = Math.max(0, main_canvas.height - 2 * srcHalf);
+  if (sx0 < 0) sx0 = 0;
+  if (sy0 < 0) sy0 = 0;
+  if (sx0 > maxSx0) sx0 = maxSx0;
+  if (sy0 > maxSy0) sy0 = maxSy0;
 
+  // Clip to circle at the *view* center
   main_ctx.save();
-  // Clip to circle
   main_ctx.beginPath();
-  main_ctx.arc(cx, cy, radiusCanvasPx, 0, Math.PI * 2);
+  main_ctx.arc(viewCx, viewCy, radiusCanvasPx, 0, Math.PI * 2);
   main_ctx.clip();
 
-  // Draw the zoomed image inside the circle
+  // Draw the zoomed image inside the circle at the center
   main_ctx.drawImage(
     image_bitmap,
-    sx,
-    sy,
+    sx0,
+    sy0,
     2 * srcHalf,
     2 * srcHalf,
-    cx - radiusCanvasPx,
-    cy - radiusCanvasPx,
+    viewCx - radiusCanvasPx,
+    viewCy - radiusCanvasPx,
     2 * radiusCanvasPx,
     2 * radiusCanvasPx,
   );
 
-  // Draw the two quad edges meeting at this corner, transformed to magnifier space
+  // Draw the two quad edges meeting at this corner, transformed into magnifier space
   if (cornerIndex != null) {
     const c = corners[cornerIndex];
     const prev = corners[(cornerIndex + 3) % 4];
     const next = corners[(cornerIndex + 1) % 4];
 
     main_ctx.save();
-    // Map source rect -> magnifier box
-    main_ctx.translate(cx - radiusCanvasPx, cy - radiusCanvasPx);
+    // Map source rect (sx0..+2srcHalf, sy0..+2srcHalf) -> magnifier box (viewCx±r, viewCy±r)
+    main_ctx.translate(viewCx - radiusCanvasPx, viewCy - radiusCanvasPx);
     const scale = radiusCanvasPx / srcHalf; // == (2r)/(2srcHalf)
     main_ctx.scale(scale, scale);
-    main_ctx.translate(-sx, -sy);
+    main_ctx.translate(-sx0, -sy0);
 
     main_ctx.strokeStyle = 'rgba(0,255,128,0.95)';
     main_ctx.lineWidth = 2; // scaled by transform
@@ -166,25 +172,25 @@ function draw_magnifier(cx, cy, radiusCanvasPx, zoom, cornerIndex) {
     main_ctx.restore();
   }
 
-  // Crosshair for precision (fixed on-screen size)
+  // Crosshair for precision (fixed on-screen size; centered in magnifier)
   const arm = UI.crosshairArmCss * s;
   main_ctx.strokeStyle = 'rgba(255,255,255,0.95)';
   main_ctx.lineWidth = 1 * s;
   main_ctx.beginPath();
-  main_ctx.moveTo(cx - arm, cy);
-  main_ctx.lineTo(cx + arm, cy);
-  main_ctx.moveTo(cx, cy - arm);
-  main_ctx.lineTo(cx, cy + arm);
+  main_ctx.moveTo(viewCx - arm, viewCy);
+  main_ctx.lineTo(viewCx + arm, viewCy);
+  main_ctx.moveTo(viewCx, viewCy - arm);
+  main_ctx.lineTo(viewCx, viewCy + arm);
   main_ctx.stroke();
 
   main_ctx.restore();
 
-  // Subtle ring/shadow
+  // Subtle ring/shadow around the magnifier
   main_ctx.save();
   main_ctx.shadowColor = 'rgba(0,0,0,0.35)';
   main_ctx.shadowBlur = 6 * s;
   main_ctx.beginPath();
-  main_ctx.arc(cx, cy, radiusCanvasPx, 0, Math.PI * 2);
+  main_ctx.arc(viewCx, viewCy, radiusCanvasPx, 0, Math.PI * 2);
   main_ctx.strokeStyle = 'rgba(0,0,0,0.22)';
   main_ctx.lineWidth = 2 * s;
   main_ctx.stroke();
@@ -251,25 +257,33 @@ function draw_grid_and_handles() {
     main_ctx.stroke();
   }
 
-  // Handles (transparent; big only WHILE dragging)
+  // Center magnifier (only while dragging)
+  if (dragging_index !== -1) {
+    const viewCx = main_canvas.width / 2;
+    const viewCy = main_canvas.height / 2;
+    const rMag = UI.magnifierRadiusCss * s;
+    const ci = dragging_index;
+    draw_magnifier(
+      viewCx,
+      viewCy,
+      rMag,
+      UI.magnifyScale,
+      ci,
+      corners[ci].x,
+      corners[ci].y,
+    );
+  }
+
+  // Corner handles: always draw at normal size
   const baseRadius = UI.handleRadiusCss * s;
-  const dragRadius = UI.handleRadiusDragCss * s;
   const strokeW = UI.handleStrokeCss * s;
+  main_ctx.strokeStyle = 'rgba(0,255,128,1)';
+  main_ctx.lineWidth = strokeW;
 
   for (let i = 0; i < 4; i++) {
     const { x, y } = corners[i];
-    const isDragging = i === dragging_index;
-    const r = isDragging ? dragRadius : baseRadius;
-
-    // Magnifier only during drag
-    if (isDragging) {
-      draw_magnifier(x, y, r, UI.magnifyScale, i);
-    }
-
-    main_ctx.strokeStyle = 'rgba(0,255,128,1)';
-    main_ctx.lineWidth = strokeW;
     main_ctx.beginPath();
-    main_ctx.arc(x, y, r, 0, Math.PI * 2);
+    main_ctx.arc(x, y, baseRadius, 0, Math.PI * 2);
     main_ctx.stroke();
   }
 }
@@ -306,7 +320,7 @@ main_canvas.addEventListener('mousedown', (e) => {
   if (idx !== -1) {
     dragging_index = idx;
     selected_corner = idx;
-    draw(); // immediately show enlarged/magnified handle
+    draw(); // show center magnifier immediately
   }
 });
 
@@ -320,12 +334,12 @@ main_canvas.addEventListener('mousemove', (e) => {
 
 window.addEventListener('mouseup', () => {
   if (dragging_index !== -1) {
-    dragging_index = -1;
-    draw(); // redraw to remove magnifier
+    dragging_index = -1; // hides center magnifier
+    draw();
   }
 });
 
-// Click to select/deselect (shows big ring on select)
+// Click to select/deselect (selection doesn’t change size; just for arrow nudging)
 main_canvas.addEventListener('click', (e) => {
   const { x: mx, y: my } = to_canvas_coords(e.clientX, e.clientY);
   const idx = hit_test_corner(mx, my);
@@ -342,7 +356,7 @@ main_canvas.addEventListener('touchstart', (e) => {
   if (idx !== -1) {
     dragging_index = idx;
     selected_corner = idx;
-    draw(); // show magnifier
+    draw(); // show center magnifier
   }
 });
 
@@ -359,7 +373,7 @@ main_canvas.addEventListener('touchmove', (e) => {
 window.addEventListener('touchend', () => {
   if (dragging_index !== -1) {
     dragging_index = -1;
-    draw(); // remove magnifier
+    draw(); // hide magnifier
   }
 });
 window.addEventListener('touchcancel', () => {
